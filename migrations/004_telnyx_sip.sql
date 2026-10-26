@@ -1,0 +1,1 @@
+-- The migration runner checks live carrier tags in the same transaction.
