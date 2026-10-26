@@ -1,0 +1,52 @@
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.log
+
+# Local environment files; keep the placeholder-only setup template
+.env
+.env.*
+!.env.example
+.envrc
+
+# Private credentials and key stores
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+.ssh/
+secrets/
+credentials/
+.npmrc
+.netrc
+
+# Generated SIP configuration, runtime state, and deployment archives
+/deployment/asterisk/
+/data/
+/backups/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Local IDE, analysis, and operating-system files
+.idea/
+.vscode/
+.fallow/
+.DS_Store
+Thumbs.db
+Desktop.ini
