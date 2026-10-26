@@ -1,0 +1,101 @@
+[
+  {
+    "type": "function",
+    "async": false,
+    "function": {
+      "name": "manage_outbound_call",
+      "description": "Interpret a fresh caller request during an authenticated private conversation. Never control the primary caller leg directly. Use confirm only after a server confirmation question and a new affirmative caller reply. A request to end the current conversation AND call someone else is one dial request for the replacement contact, not separate hangup and dial calls. The backend confirms and waits for termination before replacement.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "dial",
+              "hangup",
+              "switch",
+              "status",
+              "contacts",
+              "resume",
+              "cancel",
+              "clarify",
+              "confirm"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "description": "Friendly label, required only for dial and switch. Omit for hangup and status."
+          },
+          "utterance": {
+            "type": "string",
+            "description": "Exact current caller utterance, including short follow-up answers. Do not rewrite or add an Operator prefix."
+          },
+          "question": {
+            "type": "string",
+            "description": "One short natural question or conversational reply, required only for clarify. Never claim an action happened.",
+            "minLength": 1,
+            "maxLength": 240
+          }
+        },
+        "required": [
+          "action",
+          "utterance"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "server": {
+      "url": "https://REPLACE_PUBLIC_HOST/webhook/vapi-switchboard",
+      "credentialId": "REPLACE_BEARER_CREDENTIAL_ID",
+      "timeoutSeconds": 60
+    },
+    "messages": [
+      {
+        "type": "request-start",
+        "content": "",
+        "blocking": false
+      },
+      {
+        "type": "request-failed",
+        "content": "Command failed. Please try again."
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "async": false,
+    "function": {
+      "name": "end_operator_session",
+      "description": "Ask to end the entire session after a clear natural-language request. The server requires a separate fresh affirmative reply through manage_outbound_call confirm before ending any legs. Ordinary goodbyes are ambiguous: clarify instead.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "utterance": {
+            "type": "string",
+            "description": "Exact current caller utterance."
+          }
+        },
+        "required": [
+          "utterance"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "server": {
+      "url": "https://REPLACE_PUBLIC_HOST/webhook/vapi-switchboard",
+      "credentialId": "REPLACE_BEARER_CREDENTIAL_ID",
+      "timeoutSeconds": 60
+    },
+    "messages": [
+      {
+        "type": "request-start",
+        "content": "",
+        "blocking": false
+      },
+      {
+        "type": "request-failed",
+        "content": "Command failed. Please try again."
+      }
+    ]
+  }
+]

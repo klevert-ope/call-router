@@ -1,0 +1,10 @@
+{
+	admin 127.0.0.1:2019
+}
+
+{$PUBLIC_BASE_URL} {
+	# Admin operations are available through SSH/localhost only.
+	@admin path /admin /admin/*
+	respond @admin 404
+	reverse_proxy 127.0.0.1:3000
+}

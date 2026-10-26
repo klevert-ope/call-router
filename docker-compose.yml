@@ -1,0 +1,64 @@
+x-logging: &bounded-logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  switchboard:
+    build: .
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    logging: *bounded-logs
+    stop_grace_period: 60s
+    env_file: .env
+    environment:
+      PORT: "3000"
+      DATABASE_PATH: /app/data/switchboard.sqlite
+    volumes:
+      - switchboard-sqlite:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      asterisk:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+  asterisk:
+    build: deployment/asterisk-image
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    logging: *bounded-logs
+    stop_grace_period: 30s
+    volumes:
+      - ./deployment/asterisk:/etc/asterisk:ro
+      - asterisk-state:/var/lib/asterisk
+    tmpfs:
+      - /var/run/asterisk:uid=10001,gid=10001
+      - /var/log/asterisk:uid=10001,gid=10001
+      - /var/spool/asterisk:uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "asterisk", "-rx", "core show version"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  switchboard-sqlite:
+  asterisk-state:
