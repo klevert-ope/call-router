@@ -20,11 +20,14 @@ test('ARI events authenticate, recover inbound calls, reject callers, map busy a
   const primary = '1729330000.1';
   const channels = new Map<string, Channel>([[primary, { id: primary, state: 'Up', caller: { number: config.BOSS_PERSONAL_NUMBER }, dialplan: { context: 'from-telnyx', exten: config.TELNYX_FROM_NUMBER } }]]);
   const bridges = new Map<string, string[]>();
+  let slowAnswer: Promise<void> | undefined, answerBlocked = false;
+  let releaseAnswer = () => {};
   const providers = new HttpProviders(cfg, async (value, init) => {
     const u = new URL(String(value)), [, , resource, encoded, operation] = u.pathname.split('/');
     const id = decodeURIComponent(encoded ?? '');
     const method = init?.method ?? 'GET';
     if (resource === 'applications') return Response.json({ channel_ids: [...channels.keys()] });
+    if (resource === 'playbacks') return new Response('{}', { status: 404 });
     if (resource === 'bridges') {
       if (method === 'DELETE') bridges.delete(id);
       else if (operation === 'addChannel') {
@@ -36,6 +39,7 @@ test('ARI events authenticate, recover inbound calls, reject callers, map busy a
       return Response.json({ id, channels: bridges.get(id) ?? [] });
     }
     if (resource === 'channels') {
+      if (id === primary && operation === 'answer' && slowAnswer) { answerBlocked = true; await slowAnswer; }
       if (method === 'POST' && !id) {
         const created = { id: u.searchParams.get('channelId') ?? '', state: 'Up' };
         channels.set(created.id, created); return Response.json(created);
@@ -75,9 +79,14 @@ test('ARI events authenticate, recover inbound calls, reject callers, map busy a
     channels.set(otherCaller.id, otherCaller); send({ type: 'StasisStart', channel: otherCaller });
     await until(async () => (await f.store.get(otherCaller.id))?.authentication.state === 'pending');
     assert.equal((await f.store.get(otherCaller.id))?.commandMode, 'arming');
-    channels.delete(otherCaller.id);
-    send({ type: 'ChannelDestroyed', cause: 16, channel: otherCaller });
-    await until(async () => (await f.store.get(otherCaller.id))?.phase === 'ended');
+    slowAnswer = new Promise(resolve => { releaseAnswer = resolve; });
+    send({ type: 'StasisStart', channel: channels.get(primary) });
+    await until(async () => answerBlocked);
+    try {
+      channels.delete(otherCaller.id);
+      send({ type: 'ChannelDestroyed', cause: 16, channel: otherCaller });
+      await until(async () => (await f.store.get(otherCaller.id))?.phase === 'ended');
+    } finally { slowAnswer = undefined; releaseAnswer(); }
     const attempt = randomUUID(), destination = `destination-${attempt}`;
     await f.store.locked(primary, async s => {
       s.authentication = { state: 'verified' }; s.commandMode = 'closed';
@@ -99,13 +108,27 @@ test('ARI events authenticate, recover inbound calls, reject callers, map busy a
     await until(async () => providers.available());
     assert.equal((await f.store.get(primary))?.phase, 'active');
     assert.equal(channels.get(primary)?.state, 'Up');
+    // A retired generation can appear late after an ambiguous originate. It
+    // must be ended as unowned, never coached or rebound to the replacement.
+    const retired = (await f.store.get(primary))!.operator!;
+    const generation = randomUUID(), replacement = `operator-${generation}`;
+    channels.set(replacement, { id: replacement, state: 'Up' });
+    await f.store.locked(primary, async s => {
+      s.operator = { ...retired, generation, participantLabel: replacement, carrierCallId: replacement };
+    });
+    send({ type: 'StasisStart', channel: channels.get(retired.participantLabel) });
+    await until(async () => !channels.has(retired.participantLabel));
+    assert.equal((await f.store.get(primary))?.operator?.generation, generation);
+    assert.equal(channels.has(replacement), true);
     // Miss the caller's destroy event and leave its operator alive. A scan must
     // clean it up rather than repeatedly trying to snoop the missing caller.
     channels.delete(primary);
     await events.synchronize();
     assert.equal((await f.store.get(primary))?.phase, 'ended');
     assert.equal(channels.has(session.operator.carrierCallId), false);
+    assert.equal(channels.has(replacement), false);
   } finally {
+    releaseAnswer();
     await events.stop();
     for (const ws of sockets.clients) ws.terminate();
     await new Promise<void>(resolve => sockets.close(() => resolve()));

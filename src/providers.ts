@@ -17,6 +17,7 @@ export function failureDetails(error: unknown): Record<string, unknown> {
 export const remoteCallSchema = z.object({ sid: callSid, status: z.string() });
 export const channelSchema = z.object({ id: callSid, state: z.string(), caller: z.object({ number: z.string() }).optional(), dialplan: z.object({ context: z.string(), exten: z.string() }).optional() });
 const bridgeSchema = z.object({ id: z.string(), channels: z.array(z.string()) });
+const playbackSchema = z.object({ id: z.string(), state: z.string() });
 const vapiCallSchema = z.object({
   id: z.string(), assistantId: z.string(), status: z.string().optional(),
   customer: z.object({ number: z.string().optional(), sipUri: z.string().optional() }),
@@ -27,6 +28,12 @@ export type VapiCall = z.infer<typeof vapiCallSchema>;
 type Destination = NonNullable<Session['destination']>;
 type Operator = NonNullable<Session['operator']>;
 
+async function attemptAll(actions: (() => Promise<unknown>)[]): Promise<void> {
+  const results = await Promise.allSettled(actions.map(action => Promise.resolve().then(action)));
+  const failures = results.filter(result => result.status === 'rejected');
+  if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Telephony cleanup incomplete');
+}
+
 export interface Providers {
   available(): boolean;
   conference(name: string): Promise<string | undefined>;
@@ -36,6 +43,7 @@ export interface Providers {
   dialOperator(s: Session, o: Operator): Promise<string>;
   hold(conference: string, id: string, held: boolean, primary: string): Promise<void>;
   coach(conference: string, operator: string, primary: string): Promise<void>;
+  ringback(conference: string, primary: string, enabled: boolean): Promise<void>;
   end(id: string, primary: string, allowPrimary?: boolean): Promise<void>;
   endConference(id: string): Promise<void>;
   vapiCall(id: string): Promise<VapiCall>;
@@ -165,21 +173,39 @@ export class HttpProviders implements Providers {
     if ((await this.call(operator)).status === 'in-progress') await this.add(bridge, operator);
     await this.callerAudio(conference, primary);
   }
+  async ringback(conference: string, primary: string, enabled: boolean): Promise<void> {
+    const id = `${conference}-ringback`;
+    if (!enabled) {
+      const removed = await this.missing(() => this.ari(`playbacks/${encodeURIComponent(id)}`, 'DELETE'));
+      if (removed) await this.callerAudio(conference, primary);
+      return;
+    }
+    const playback = await this.missing(async () => playbackSchema.parse(await this.ari(`playbacks/${encodeURIComponent(id)}`)));
+    if (playback && ['queued', 'playing'].includes(playback.state)) return;
+    const bridge = bridgeSchema.parse(await this.ari(`bridges/${encodeURIComponent(conference)}`));
+    if (bridge.channels.length !== 1 || bridge.channels[0] !== primary) throw new Error('Ringback bridge is not caller-only');
+    // Bridge playback supplies audio timing. Leaving the caller's silence
+    // generator active would suppress ringback just as it suppresses a peer.
+    await this.ari(`channels/${encodeURIComponent(primary)}/silence`, 'DELETE');
+    await this.ari(`bridges/${encodeURIComponent(conference)}/play/${encodeURIComponent(id)}`, 'POST', { media: 'tone:ring;tonezone=us' });
+  }
   async end(id: string, primary: string, allowPrimary = false): Promise<void> {
     if (id === primary && !allowPrimary) throw new Error('Primary leg protected');
-    await this.missing(() => this.ari(`channels/${encodeURIComponent(callSid.parse(id))}`, 'DELETE'));
+    const actions = [() => this.missing(() => this.ari(`channels/${encodeURIComponent(callSid.parse(id))}`, 'DELETE'))];
     if (/^operator-[a-f0-9-]{36}$/.test(id)) {
-      await this.missing(() => this.ari(`channels/${encodeURIComponent(`${id}-snoop`)}`, 'DELETE'));
-      await this.missing(() => this.ari(`bridges/${encodeURIComponent(`${id}-audio`)}`, 'DELETE'));
+      actions.push(() => this.missing(() => this.ari(`channels/${encodeURIComponent(`${id}-snoop`)}`, 'DELETE')),
+        () => this.missing(() => this.ari(`bridges/${encodeURIComponent(`${id}-audio`)}`, 'DELETE')));
     }
+    await attemptAll(actions);
   }
   async endConference(id: string): Promise<void> {
-    for (const bridge of [id, `${id}-hold`]) {
-      const b = await this.missing(async () => bridgeSchema.parse(await this.ari(`bridges/${encodeURIComponent(bridge)}`)));
-      // Destroying an ARI bridge does not hang up its channels. Session cleanup
-      // explicitly terminates known legs after removing the bridges.
-      if (b) await this.ari(`bridges/${encodeURIComponent(bridge)}`, 'DELETE');
-    }
+    await attemptAll([() => this.missing(() => this.ari(`playbacks/${encodeURIComponent(`${id}-ringback`)}`, 'DELETE')),
+      ...[id, `${id}-hold`].map(bridge => async () => {
+        const b = await this.missing(async () => bridgeSchema.parse(await this.ari(`bridges/${encodeURIComponent(bridge)}`)));
+        // Bridge deletion does not terminate channels; the switchboard also
+        // hangs up every owned leg independently.
+        if (b) await this.ari(`bridges/${encodeURIComponent(bridge)}`, 'DELETE');
+      })]);
   }
   async vapiCall(id: string): Promise<VapiCall> {
     const c = vapiCallSchema.parse(await this.json(`https://api.vapi.ai/call/${encodeURIComponent(id)}`, {

@@ -28,6 +28,10 @@ export class FakeProviders implements Providers {
   ended: string[] = []; holds: { id: string; held: boolean }[] = []; spoken: string[] = [];
   contexts: string[] = []; creates = 0; operatorCreates = 0; closed = false; ambiguous = false; holdFails = false;
   muted = false; muteFails = false; muteCalls: boolean[] = [];
+  ringing = false; ringbacks: boolean[] = [];
+  async ringback(_conference: string, _primary: string, enabled: boolean): Promise<void> {
+    this.ringing = enabled; this.ringbacks.push(enabled);
+  }
   async conference(): Promise<string> { return conference; }
   async call(id: string): Promise<RemoteCall> { return { sid: id, status: this.calls.get(id) ?? 'completed' }; }
   async participant(_conference: string, label: string) { return this.participants.get(label); }
@@ -51,7 +55,7 @@ export class FakeProviders implements Providers {
     if (id === protectedPrimary && !allowPrimary) throw new Error('Primary protected');
     this.ended.push(id); this.calls.set(id, 'completed');
   }
-  async endConference(): Promise<void> { this.closed = true; }
+  async endConference(): Promise<void> { this.closed = true; this.ringing = false; }
   async vapiCall(id: string): Promise<VapiCall> {
     return { id, assistantId: config.VAPI_ASSISTANT_ID, customer: { number: this.identity }, monitor: { controlUrl: 'https://live.vapi.ai/id/control' } };
   }

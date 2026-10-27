@@ -82,6 +82,20 @@ test('real Asterisk two-way RTP survives private hold and caller recovery', { sk
     const session = new Switchboard(new Store(db), providers, log).newSession(caller.id);
     session.conferenceName = bridge;
     await providers.prepare(session);
+    await providers.ringback(bridge, caller.id, true);
+    await providers.ringback(bridge, caller.id, true); // Recovery must reuse playback.
+    await providers.prepare(session);
+    let audible = false;
+    const ringDeadline = Date.now() + 8000;
+    while (!audible && Date.now() < ringDeadline) {
+      const ring = await levels();
+      audible = ring[0]![0]! > 2000; // US ringback includes 440 Hz.
+      expectTones(ring[1]!, [], [0, 1, 2], 'unbridged destination');
+    }
+    assert.ok(audible, 'Caller must hear ringback through real Asterisk');
+    await providers.ringback(bridge, caller.id, false);
+    const quiet = await levels();
+    expectTones(quiet[0]!, [], [0, 1, 2], 'caller after ringback stops');
     await providers.hold(bridge, destination.id, false, caller.id);
     let received = await levels();
     expectTones(received[0]!, [1], [0, 2], 'caller');

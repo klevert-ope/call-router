@@ -4,6 +4,7 @@ import type { Logger } from 'pino';
 import type { Config } from './config.js';
 import { channelSchema, failureDetails, HttpProviders } from './providers.js';
 import type { Switchboard } from './switchboard.js';
+import { QueueDiscarded, QueueFull, SessionQueue } from './session-queue.js';
 
 const eventSchema = z.object({ type: z.string(), channel: channelSchema.optional(), cause: z.number().optional() });
 const applicationSchema = z.object({ channel_ids: z.array(z.string()) });
@@ -19,9 +20,11 @@ export class AsteriskEvents {
   private socket?: WebSocket;
   private stopped = false;
   private retry?: ReturnType<typeof setTimeout>;
+  private rescan?: ReturnType<typeof setTimeout>;
   private heartbeat?: ReturnType<typeof setInterval>;
   private alive = true;
-  private queue: Promise<void> = Promise.resolve();
+  private readonly queue = new SessionQueue();
+  private lifecycle: Promise<void> = Promise.resolve();
   constructor(private readonly config: Config, private readonly providers: HttpProviders,
     private readonly board: Switchboard, private readonly log: Logger) {}
   start(): void {
@@ -34,50 +37,84 @@ export class AsteriskEvents {
     socket.on('open', () => {
       this.alive = true;
       this.heartbeat = setInterval(() => { if (!this.alive) socket.terminate(); else { this.alive = false; socket.ping(); } }, 15_000);
-      this.enqueue(() => this.initialize());
+      this.control(() => this.initialize(socket));
     });
     socket.on('pong', () => { this.alive = true; });
     socket.on('message', data => {
-      this.enqueue(async () => {
+      if (this.stopped || this.socket !== socket) return;
+      try {
         const event = eventSchema.parse(JSON.parse(data.toString()));
         if (event.channel && ['StasisStart', 'ChannelStateChange', 'ChannelDestroyed', 'StasisEnd'].includes(event.type)) {
           const terminalStatus = event.type === 'ChannelDestroyed' ? hangupStatus(event.cause) : undefined;
-          await this.handle(event.channel, event.type === 'StasisStart', terminalStatus);
+          void this.dispatch(event.channel, event.type === 'StasisStart', terminalStatus).catch(error => this.failed(error));
         }
-      });
+      } catch (error) { this.failed(error); }
     });
     socket.on('error', () => { this.log.warn({ event: 'ari_socket_error' }, 'Asterisk connection failed'); });
     socket.on('close', () => {
+      if (this.socket !== socket) return;
       this.providers.setConnected(false);
+      this.queue.discardPending();
       if (this.heartbeat) clearInterval(this.heartbeat);
-      if (!this.stopped) this.enqueue(() => this.board.suspendControls());
+      if (!this.stopped) this.control(() => this.board.suspendControls());
       if (!this.stopped) this.retry = setTimeout(() => this.start(), 3000);
     });
   }
-  private enqueue(action: () => Promise<void>): void {
-    this.queue = this.queue.then(action).catch(error => {
-      this.log.warn({ event: 'ari_event_failed', ...failureDetails(error) }, 'Asterisk event will reconcile');
-      // Retry a complete authoritative scan after an event failed, including
-      // inbound calls whose session had not yet been persisted.
-      if (!this.stopped && this.socket?.readyState === WebSocket.OPEN) {
-        if (this.retry) clearTimeout(this.retry);
-        this.retry = setTimeout(() => this.enqueue(() => this.initialize()), 3000);
-      }
-    });
+  private control(action: () => Promise<void>): void {
+    this.lifecycle = this.lifecycle.then(action).catch(error => this.failed(error));
   }
-  private async initialize(): Promise<void> {
+  private failed(error: unknown): void {
+    if (error instanceof QueueDiscarded) return;
+    this.log.warn({ event: 'ari_event_failed', ...failureDetails(error) }, 'Asterisk event will reconcile');
+    if (error instanceof QueueFull) {
+      // Stop accepting commands and reconnect for an authoritative scan rather
+      // than allowing an unbounded backlog of obsolete channel events.
+      this.providers.setConnected(false);
+      this.socket?.terminate();
+      this.queue.discardPending();
+      return;
+    }
+    // Retry a complete authoritative scan after an event failed, including
+    // inbound calls whose session had not yet been persisted.
+    if (!this.stopped && this.socket?.readyState === WebSocket.OPEN && !this.rescan) {
+      this.rescan = setTimeout(() => {
+        this.rescan = undefined;
+        const socket = this.socket;
+        if (socket?.readyState === WebSocket.OPEN) this.control(() => this.initialize(socket));
+      }, 3000);
+    }
+  }
+  private async initialize(socket: WebSocket): Promise<void> {
+    if (this.stopped || this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
     if (!this.providers.available()) await this.board.suspendControls();
     await this.synchronize();
-    if (this.socket?.readyState !== WebSocket.OPEN) return;
+    if (this.stopped || this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
     this.providers.setConnected(true);
     await this.board.reconcile();
   }
   async synchronize(): Promise<void> {
+    const socket = this.socket;
     const app = applicationSchema.parse(await this.providers.ari(`applications/${encodeURIComponent(this.config.ASTERISK_APP)}`));
-    for (const id of app.channel_ids) {
-      const c = await this.providers.missing(() => this.providers.channel(id));
-      if (c) await this.handle(c, true);
+    // Submit in bounded batches so large scans do not flood the event queue.
+    const failures: unknown[] = [];
+    for (let offset = 0; offset < app.channel_ids.length; offset += 32) {
+      if (this.stopped || this.socket !== socket || socket?.readyState !== WebSocket.OPEN) throw new QueueDiscarded('ARI scan superseded');
+      const results = await Promise.allSettled(app.channel_ids.slice(offset, offset + 32).map(async id => {
+        const key = await this.board.store.channelOwner(id);
+        await this.queue.submit(key, async () => {
+          const c = await this.providers.missing(() => this.providers.channel(id));
+          if (c) await this.handle(c, true);
+        });
+      }));
+      for (const result of results) if (result.status === 'rejected') failures.push(result.reason);
     }
+    if (failures.length) throw new AggregateError(failures, 'ARI scan incomplete');
+  }
+  private async dispatch(channel: z.infer<typeof channelSchema>, entering: boolean, terminalStatus?: string): Promise<void> {
+    const socket = this.socket;
+    const key = await this.board.store.channelOwner(channel.id);
+    if (this.stopped || this.socket !== socket || socket?.readyState !== WebSocket.OPEN) return;
+    await this.queue.submit(key, () => this.handle(channel, entering, terminalStatus));
   }
   private async handle(channel: z.infer<typeof channelSchema>, entering: boolean, terminalStatus?: string): Promise<void> {
     const id = channel.id;
@@ -85,7 +122,7 @@ export class AsteriskEvents {
     if (session) {
       if (session.phase === 'ended') { await this.providers.end(id, id, true); return; }
       if ((await this.providers.call(id)).status === 'completed') { await this.board.primaryEnded(id); return; }
-      if (entering) { await this.providers.prepare(session); await this.board.joined(id, session.conferenceName); }
+      if (entering && session.phase === 'active') { await this.providers.prepare(session); await this.board.joined(id, session.conferenceName); }
       return;
     }
     const observed = (await this.providers.call(id)).status;
@@ -105,7 +142,6 @@ export class AsteriskEvents {
         if ((await this.providers.call(s.primaryCallId)).status === 'completed') {
           await this.board.primaryEnded(s.primaryCallId); return;
         }
-        if ((await this.providers.call(id)).status === 'in-progress') await this.providers.coach(s.conferenceName, id, s.primaryCallId);
         await this.board.leg(s.primaryCallId, s.operator.generation, 'operator', id, status); return;
       }
     }
@@ -123,8 +159,11 @@ export class AsteriskEvents {
   async stop(): Promise<void> {
     this.stopped = true; this.providers.setConnected(false);
     if (this.retry) clearTimeout(this.retry);
+    if (this.rescan) clearTimeout(this.rescan);
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.socket?.terminate();
-    await this.queue;
+    this.queue.discardPending();
+    await this.lifecycle;
+    await this.queue.idle();
   }
 }

@@ -76,6 +76,16 @@ export class Store {
     const r = await this.db.query("SELECT data FROM sessions WHERE json_extract(data,'$.phase')<>'ended' ORDER BY updated_at");
     return r.rows.map(row => sessionSchema.parse(row.data));
   }
+  async channelOwner(id: string): Promise<string> {
+    // Primary events use the indexed key. Secondary lookups only inspect live
+    // ownership, so retained history cannot claim a retired channel.
+    if (this.db.query('SELECT primary_call_id FROM sessions WHERE primary_call_id=$1', [id]).rowCount) return id;
+    const row = this.db.query(`SELECT primary_call_id FROM sessions WHERE json_extract(data,'$.phase')<>'ended'
+      AND (json_extract(data,'$.destination.participantLabel')=$1 OR json_extract(data,'$.destination.callId')=$1
+      OR json_extract(data,'$.operator.participantLabel')=$1 OR json_extract(data,'$.operator.carrierCallId')=$1
+      OR json_extract(data,'$.operator.participantLabel') || '-snoop'=$1) LIMIT 1`, [id]).rows[0];
+    return row ? z.string().parse(row.primary_call_id) : id;
+  }
   async due(): Promise<Session[]> {
     const r = await this.db.query(`SELECT data FROM sessions WHERE json_extract(data,'$.phase')<>'ended'
       AND (json_extract(data,'$.commandDeadline') <= $1 OR json_extract(data,'$.replyDeadline') <= $1

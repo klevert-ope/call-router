@@ -71,6 +71,7 @@ export const sessionSchema = z.object({
   lastWakeAt: z.number().default(0),
   primaryCallId: callSid, conferenceName: z.string(), conferenceId: conferenceSid.nullable(),
   phase: z.enum(['active', 'ending', 'ended']),
+  endPrimaryOnCleanup: z.boolean().default(false),
   commandMode: z.enum(['open', 'arming', 'closed']), commandDeadline: z.number().nullable(),
   replyDeadline: z.number().nullable().default(null),
   announcement: z.object({ kind: z.enum(['pin', 'pin-retry', 'ready']), generation: z.string(), retryAt: z.number(), expiresAt: z.number() }).nullable().default(null),
@@ -94,7 +95,9 @@ export const sessionSchema = z.object({
     controlUrl: z.string().nullable(), state: z.enum(['creating', 'unknown', 'connected', 'ending']),
     createdAt: z.number(),
   }).nullable(),
-  notice: z.string().nullable(), retryOperatorAt: z.number(),
+  notice: z.string().nullable(),
+  noticeDelivery: z.object({ content: z.string(), retryAt: z.number(), expiresAt: z.number() }).nullable().default(null),
+  retryOperatorAt: z.number(),
 });
 export type Session = z.infer<typeof sessionSchema>;
 export const toolSchema = z.object({
