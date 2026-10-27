@@ -64,6 +64,8 @@ Server announcements briefly enable the assistant's voice, then mute it again af
 
 The caller's Asterisk silence generator runs only when the caller is alone in the main bridge, supplying audio timing for private operator speech. It stops when the destination joins or resumes: leaving it active suppresses destination-to-caller audio. Hold, operator setup, and caller recovery synchronize the generator with actual bridge membership. The opt-in `test/asterisk-audio.test.ts` regression sends synthetic RTP tones through real Asterisk and verifies both directions, private isolation, resumption, and caller recovery without dialing external numbers.
 
+After the dial acknowledgement, Asterisk plays local US ringback while the destination rings. Playback uses one deterministic ID per session, so recovery reuses an existing tone. It stops before private speech, an answer, cancellation, or cleanup. The caller silence generator is disabled while ringback supplies audio timing and restored when appropriate. Pre-answer carrier audio is deliberately not bridged; SIP 180/183 progress retains local ringback, and terminal outcomes are announced separately.
+
 Anyone with the correct PIN may use the service from any phone. The spoken PIN authorizes access. The configured PIN is never in the assistant prompt. The Vapi template disables recordings, saved transcripts, and logging. Live transcript webhooks remain necessary. The backend never stores authentication transcript text; Vapi processes speech to provide the service.
 
 ## Address book
@@ -84,6 +86,8 @@ Unauthenticated admission is limited to two pending sessions and 20 new sessions
 
 PIN, retry, and readiness announcements remain pending until the control request succeeds. Failed sends retry every three seconds, bounded by a one-minute delivery deadline and the authentication/reply deadlines. A crash or ambiguous send may repeat a prompt; it cannot repeat an outbound call. Persistent delivery failure ends the session.
 
+Call-status announcements also remain pending after failed delivery. They retry after at least three seconds and the speech/mute fallback, expire after one minute, and are discarded when a new dial supersedes them. A lost response may repeat an announcement. Expired status notices are logged and discarded without ending an otherwise healthy conversation.
+
 ## State and recovery
 
 SQLite stores contacts, sessions, attempts, and tool results at `DATABASE_PATH`, which defaults to `./data/switchboard.sqlite`. Startup applies SQL migrations automatically. Run one backend replica against the database.
@@ -92,7 +96,9 @@ The primary Asterisk channel identifies a session. Destination/operator IDs are 
 
 Recovery runs every 15 seconds, with deadline checks every second. ARI reconnects and rescans resources. Commands stay closed during disconnection and require fresh transcripts after recovery. Backend shutdown does not request hangups. Asterisk/VPS failure ends media; recovery marks sessions ended without redialing. Operator replacement preserves caller/destination legs.
 
-Explicit end-session commands and caller disconnect clean up the session. Vapi call-record deletion is never used for live hangup. Unknown creations remain blocked until resolved or session cleanup. Bridge deletion alone does not terminate channels; cleanup explicitly ends owned legs.
+ARI events retain order per session, with up to four sessions processed concurrently and a maximum of 512 accepted events. A full queue closes command availability and reconnects for an authoritative scan. Disconnect discards queued events; the scan recovers current state instead of replaying an obsolete backlog. A slow provider request in one call does not serialize every other call's events.
+
+Explicit end-session commands and caller disconnect clean up the session. Vapi call-record deletion is never used for live hangup. Unresolved destination creations remain blocked until resolved or session cleanup. An operator that has not connected and bound its controls within one minute is canceled by its persisted channel ID. Replacement requires a successful termination request and confirmed terminal channel status; failed or uncertain cancellation remains blocked. Retired operator callbacks cannot bind to the replacement. Bridge deletion alone does not terminate channels; cleanup independently attempts every owned leg and bridge, retains failed cleanup state for retry, and persists whether the primary caller must also end.
 
 Monitor readiness, connection/reconciliation failures, and unresolved attempts. Protect backups containing numbers and SIP binding identities. Ended-data retention defaults to 30 days via `SESSION_RETENTION_DAYS`. Run one backend replica. Compose persists SQLite in the `switchboard-sqlite` volume. Back up the entire database directory while the backend is stopped, including any WAL files.
 

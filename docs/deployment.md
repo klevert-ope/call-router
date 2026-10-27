@@ -13,6 +13,8 @@ If behind NAT, add `external_media_address`, `external_signaling_address`, and a
 
 The example uses UDP and G.711 ulaw/alaw. HTTPS does not encrypt SIP/RTP. Configure compatible SIP TLS/SRTP on both provider connections if required.
 
+The Telnyx endpoint templates set `rtp_timeout=120`, `rtp_timeout_hold=600`, and `rtp_keepalive=30`. These detect missing received media, rather than silence in speech, and keep the outbound NAT binding active. Copy these settings into both private `telnyx-in` and `telnyx-out` endpoint sections before rollout. Test continuous RTP, carrier silence suppression/DTX, physical mute, and hold before accepting these thresholds. Asterisk holding bridges do not necessarily put the SIP dialog into remote hold, so the 120-second limit can still apply there. Vapi receive timeouts stay disabled because a muted assistant can legitimately send no audio; its call and control binding are monitored separately. See [Asterisk RTP settings](https://docs.asterisk.org/Asterisk_22_Documentation/API_Documentation/Module_Configuration/res_pjsip/#rtp_timeout).
+
 ## Asterisk
 
 Copy `deployment/asterisk.example` to `deployment/asterisk`. Replace all `REPLACE_` placeholders. The latter directory is ignored by Git and the backend Docker build.
